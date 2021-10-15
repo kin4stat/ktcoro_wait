@@ -33,8 +33,12 @@ public:
     }
 
     void process() {
+        process_for_thread(std::this_thread::get_id());
+    }
+
+    void process_for_thread(std::thread::id thread_id) {
         std::lock_guard lock(tasklists_mut);
-        auto& local_tasklist = tasklists[std::this_thread::get_id()];
+        auto& local_tasklist = tasklists[thread_id];
         for (auto& task : local_tasklist) {
             if (std::chrono::steady_clock::now() > task.wake_time && task.handle) {
                 task.handle();
