@@ -4,107 +4,45 @@
 #include <coroutine>
 #include <list>
 #include <chrono>
-#include <memory>
-#include <mutex>
-#include <thread>
-#include <map>
+#include <utility>
 
 namespace detail {
     struct ctx {
         std::coroutine_handle<> handle;
-        std::chrono::time_point<std::chrono::steady_clock,
-            std::chrono::milliseconds> wake_time;
+        std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds> wake_time;
         bool completed{ false };
 
-        ctx(std::coroutine_handle<> h, std::chrono::time_point<std::chrono::steady_clock,
-            std::chrono::milliseconds> t) : handle(h), wake_time(t) {
-
-        }
+        ctx(std::coroutine_handle<> h,
+            std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds> t) :
+            handle(h), wake_time(t) {}
     };
 }
 
 struct ktwait;
 
-class ktcoro_wait {
+class ktcoro_tasklist {
+    using list_type = std::list<detail::ctx>;
 public:
-    static ktcoro_wait& Instance() {
-        static ktcoro_wait inst{};
-        return inst;
+    template <typename Coroutine, typename... Args>
+    ktwait add_task(Coroutine coro, Args&&... coro_args);
+
+    void add_started_task(std::coroutine_handle<> coro, std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds> time) {
+        tasks.emplace_back(coro, time);
     }
 
     void process() {
-        process_for_thread(std::this_thread::get_id());
-    }
-
-    void process_for_thread(std::thread::id thread_id) {
-        std::lock_guard lock(tasklists_mut);
-        auto& local_tasklist = tasklists[thread_id];
-        for (auto& task : local_tasklist) {
+        for (auto& task : tasks) {
             if (std::chrono::steady_clock::now() > task.wake_time && task.handle) {
                 task.handle();
                 task.completed = true;
             }
         }
-        local_tasklist.remove_if([](auto& task) { return task.completed; });
+        tasks.remove_if([](auto& task) { return task.completed; });
     }
 
-    void process_all_tasks() {
-        std::lock_guard lock(tasklists_mut);
-        for (auto& tasklist : tasklists) {
-            for (auto& task : tasklist.second) {
-                if (std::chrono::steady_clock::now() > task.wake_time && task.handle) {
-                    task.handle();
-                    task.completed = true;
-                }
-            }
-            tasklist.second.remove_if([](auto& task) { return task.completed; });
-        }
-    }
-
-    void add_task(std::coroutine_handle<>& h, const std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds>& time) {
-        tasklists[std::this_thread::get_id()].emplace_back(h, time);
-    }
-
-    void remove_task_for_current_thread(std::coroutine_handle<> coro_handle) {
-        remove_task_for_thread(std::this_thread::get_id(), coro_handle);
-    }
-
-    void remove_task_for_thread(std::thread::id thread_id, std::coroutine_handle<> coro_handle) {
-        std::lock_guard lock(tasklists_mut);
-        auto& local_tasklist = tasklists[thread_id];
-        for (auto task = local_tasklist.begin(); task != local_tasklist.end(); ++task) {
-            if (task->handle == coro_handle) {
-                task->handle.destroy();
-                local_tasklist.erase(task);
-                break;
-            }
-        }
-    }
-
-    void remove_task(std::coroutine_handle<> coro_handle) {
-        std::lock_guard lock(tasklists_mut);
-        for (auto& local_tasklist : tasklists) {
-            for (auto task = local_tasklist.second.begin(); task != local_tasklist.second.end(); ++task) {
-                if (task->handle == coro_handle) {
-                    task->handle.destroy();
-                    local_tasklist.second.erase(task);
-                    break;
-                }
-            }
-        }
-    }
-
-    const std::list<detail::ctx>& get_thread_tasklist() {
-        return tasklists[std::this_thread::get_id()];
-    }
-
-    const std::map<std::thread::id, std::list<detail::ctx>>& get_tasklists() {
-        return tasklists;
-    }
-
+    void remove_task(ktwait& task);
 private:
-    std::map<std::thread::id, std::list<detail::ctx>> tasklists;
-    std::recursive_mutex tasklists_mut;
+    list_type tasks;
 };
 
 struct ktwait {
@@ -113,7 +51,7 @@ struct ktwait {
         void return_void() const {}
 
         auto initial_suspend() const {
-            return std::suspend_never{};
+            return std::suspend_always{};
         }
 
         auto final_suspend() noexcept {
@@ -137,32 +75,32 @@ struct ktwait {
         }
 
         template <class Clock, class Duration>
-        auto yield_value(ktcoro_wait& wq, const std::chrono::time_point<Clock, Duration>& time) const {
+        auto yield_value(const std::chrono::time_point<Clock, Duration>& time) {
             struct schedule_for_execution {
-                ktcoro_wait& wq;
-                std::chrono::time_point<std::chrono::steady_clock,
+                ktcoro_tasklist* wq;
+                std::chrono::time_point<Clock,
                     std::chrono::milliseconds> t;
 
                 constexpr bool await_ready() const noexcept { return false; }
                 void await_suspend(std::coroutine_handle<> this_coro) const {
-                    wq.add_task(this_coro, t);
+                    wq->add_started_task(this_coro, t);
                 }
                 constexpr void await_resume() const noexcept {}
             };
-            return schedule_for_execution{ wq, std::chrono::time_point_cast<std::chrono::milliseconds>(time) };
+            return schedule_for_execution{ coro_tasklist, std::chrono::time_point_cast<std::chrono::milliseconds>(time) };
         }
 
-        auto yield_value() const {
-            return yield_value(ktcoro_wait::Instance(), std::chrono::steady_clock::now());
+        auto yield_value() {
+            return yield_value(std::chrono::steady_clock::now());
         }
 
         template <class Rep, class Period>
         auto await_transform(const std::chrono::duration<Rep, Period>& time) {
-            return yield_value(ktcoro_wait::Instance(), std::chrono::steady_clock::now() + time);
+            return yield_value(std::chrono::steady_clock::now() + time);
         }
 
         auto await_transform(unsigned long msecs) {
-            return yield_value(ktcoro_wait::Instance(), std::chrono::steady_clock::now() + std::chrono::milliseconds(msecs));
+            return yield_value(std::chrono::steady_clock::now() + std::chrono::milliseconds(msecs));
         }
 
         auto await_transform(ktwait waitobj) {
@@ -173,19 +111,68 @@ struct ktwait {
                     return false;
                 }
                 void await_suspend(std::coroutine_handle<promise_type> h) const {
-                    waitobj.coro.promise().waiter = h;
+                    namespace c = std::chrono;
+                    auto& called_by = waitobj.coro_handle.promise();
+                    called_by.waiter = h;
+                    called_by.coro_tasklist = h.promise().coro_tasklist;
+                    called_by.coro_tasklist->add_started_task(waitobj.coro_handle, c::time_point_cast<c::milliseconds>(c::steady_clock::now()));
                 }
                 void await_resume() const noexcept { }
             };
-            return execute_on_await{ waitobj };
+            return execute_on_await{ std::move(waitobj) };
         }
 
         std::coroutine_handle<promise_type> waiter;
+        ktcoro_tasklist* coro_tasklist;
     };
 
-    ktwait(std::coroutine_handle<promise_type> h) : coro(h) {}
+    ktwait(std::coroutine_handle<promise_type> h) : coro_handle(h) {}
+    ktwait(ktwait&&) = default;
 
-    std::coroutine_handle<promise_type> coro;
-    std::coroutine_handle<promise_type> suspended_by;
+    std::coroutine_handle<promise_type> coro_handle;
 };
+
+namespace detail {
+    bool remove_task_recursively(std::coroutine_handle<ktwait::promise_type>& waiter, std::coroutine_handle<ktwait::promise_type>& task) {
+        if (!waiter) return false;
+        if (waiter == task) { task.destroy(); return true; }
+        if (remove_task_recursively(waiter.promise().waiter, task)) {
+            waiter.destroy();
+            return true;
+        }
+        return false;
+    }
+}
+
+template<typename Coroutine, typename ...Args>
+ktwait ktcoro_tasklist::add_task(Coroutine coro, Args && ...coro_args) {
+    namespace c = std::chrono;
+    ktwait task{ std::move(coro(std::forward<Args>(coro_args)...)) };
+    task.coro_handle.promise().coro_tasklist = this;
+    add_started_task(task.coro_handle, c::time_point_cast<c::milliseconds>(c::steady_clock::now()));
+    return task;
+}
+
+void ktcoro_tasklist::remove_task(ktwait& task) {
+    for (auto it = tasks.begin(); it != tasks.end();) {
+        if (it->handle == task.coro_handle) {
+            it->handle.destroy();
+            tasks.erase(it++);
+        }
+        else if (auto coro_handle{ std::coroutine_handle<ktwait::promise_type>::from_address(it->handle.address()) }) {
+            auto& tw = coro_handle.promise().waiter;
+            if (detail::remove_task_recursively(tw, task.coro_handle)) {
+                coro_handle.destroy();
+                tasks.erase(it++);
+            }
+            else {
+                ++it;
+            }
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
 #endif // KTCORO_WAIT_HPP_

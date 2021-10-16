@@ -33,15 +33,16 @@ ktwait foo(int time) {
         co_await std::chrono::seconds(time);
         std::cout << "I am calling baz every " << time << " seconds" << std::endl;
         co_await baz();
-        std::cout << "I am not waiting for baz" << std::endl;
+        std::cout << "I am waiting for baz" << std::endl;
     }
 }
 
 int main() {
-    foo(2);
-    bar();
+    ktcoro_tasklist tasklist;
+    tasklist.add_task(foo, 2);
+    tasklist.add_task(bar);
     while (true) {
-        ktcoro_wait::Instance().process();
+        tasklist.process();
     }
 }
 ```
