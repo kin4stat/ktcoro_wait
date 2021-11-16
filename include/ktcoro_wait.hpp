@@ -133,7 +133,7 @@ struct ktwait {
 };
 
 namespace detail {
-    bool remove_task_recursively(std::coroutine_handle<ktwait::promise_type>& waiter, std::coroutine_handle<ktwait::promise_type>& task) {
+    inline bool remove_task_recursively(std::coroutine_handle<ktwait::promise_type>& waiter, std::coroutine_handle<ktwait::promise_type>& task) {
         if (!waiter) return false;
         if (waiter == task) { task.destroy(); return true; }
         if (remove_task_recursively(waiter.promise().waiter, task)) {
@@ -145,7 +145,7 @@ namespace detail {
 }
 
 template<typename Coroutine, typename ...Args>
-ktwait ktcoro_tasklist::add_task(Coroutine coro, Args && ...coro_args) {
+inline ktwait ktcoro_tasklist::add_task(Coroutine coro, Args && ...coro_args) {
     namespace c = std::chrono;
     ktwait task{ std::move(coro(std::forward<Args>(coro_args)...)) };
     task.coro_handle.promise().coro_tasklist = this;
@@ -153,7 +153,7 @@ ktwait ktcoro_tasklist::add_task(Coroutine coro, Args && ...coro_args) {
     return task;
 }
 
-void ktcoro_tasklist::remove_task(ktwait& task) {
+inline oid ktcoro_tasklist::remove_task(ktwait& task) {
     for (auto it = tasks.begin(); it != tasks.end();) {
         if (it->handle == task.coro_handle) {
             it->handle.destroy();
