@@ -153,7 +153,7 @@ inline ktwait ktcoro_tasklist::add_task(Coroutine coro, Args && ...coro_args) {
     return task;
 }
 
-inline oid ktcoro_tasklist::remove_task(ktwait& task) {
+inline void ktcoro_tasklist::remove_task(ktwait& task) {
     for (auto it = tasks.begin(); it != tasks.end();) {
         if (it->handle == task.coro_handle) {
             it->handle.destroy();
